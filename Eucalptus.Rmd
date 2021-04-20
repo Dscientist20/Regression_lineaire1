@@ -1,0 +1,289 @@
+---
+title: "2021_Code_Euca_M2DS"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2) 
+library(knitr) 
+library(dplyr)
+library(MASS)
+library(gridExtra)
+library(aod)
+library(lasso2)
+library(ISwR)
+library(Epi)
+library(aod)
+library("ggfortify")
+library("tidyverse")
+library("reshape2")
+library(faraway)
+library(leaps)
+opts_template$set(figure1 = list(fig.height = 4, fig.width = 4), 
+                  figure2 = list(fig.height = 2, fig.width = 4), 
+                  figure3 = list(fig.height =19, fig.width = 21))
+```
+
+The goal is to predict the height of an eucalyptus from its circumference. In order to do this, we have a dataset of 1429 trees with 4 measurements: the height `ht`, the circumference `circ` as well as two other variables, the geographic zone `bloc` and the tree origin `clone`, that we are not going to use in the beginning.
+
+
+
+```{r Read}
+eucalyptus <- read.table("eucalyptus.txt",sep=";", header=TRUE)
+glimpse(eucalyptus)
+attach(eucalyptus,warn.conflicts=FALSE)
+```
+
+
+Use the command `mutate` to transform the column `bloc` into a factor and verify that the dataset is _clean_.
+
+```{r Tidy}
+eucalyptus <- mutate(eucalyptus, bloc = factor(bloc))
+glimpse(eucalyptus)
+summary(eucalyptus)
+```
+
+
+
+# Graphiques
+
+```{r Plot_Lm, opts.label = "figure3"}
+library(gridExtra)
+peuc <- ggplot(data = eucalyptus, aes(x = circ, y = ht)) + geom_point()
+peuc
+peucadv <- ggplot(data = eucalyptus, aes(x = circ, y = ht)) +
+  geom_point(alpha = .5, position = "jitter", size = 1)
+peucadv
+plt1 = peuc + geom_smooth() + ggtitle("Non-parametric")
+plt2 = peuc + geom_smooth(method = "lm") + ggtitle("Prediction linéaire")
+grid.arrange(plt1, plt2,
+        ncol=2, nrow=1)
+```
+## En travaillant sur les polynômes
+Pour 
+$$d=1, \cdots, D$$
+
+$$X=\begin{pmatrix} 1 & X_1 & X_1^2\cdots X_1^d\\
+           .&.&.\\
+      1 & X_n & X_n^2\cdots  X_n^d\end{pmatrix}
+     $$
+     
+$$\arg\min_{\theta\in\mathbb{R}^{d+1}}\parallel Y-X\theta\parallel^2$$
+# Calcul des modèles linéaires correspondant aux polynomes de degré 1 à D  
+```{r}
+D <- 9
+euca_df<-data.frame(x=circ,Y=ht)
+compute_model <- function(degree, euca_df) {
+  mod <- lm(ht ~ poly(circ, degree, raw = TRUE), data = euca_df)
+  pred_n <- predict.lm(mod,euca_df)
+  pred_df_n <- data.frame(x=circ,pred=pred_n)          
+  emp_err <- mean((ht-pred_n)^2)
+  tibble(degree = degree, model = list(mod), 
+         pred_n = list(pred_df_n), emp_err = emp_err)
+} 
+```
+Attention:
+$$\parallel Y - \hat{\theta} X\parallel^2
+$$
+# Liste de tous les modèles polynomiaux
+```{r}
+all_models <- list()
+for (i in 1:D) {
+  all_models <- c(all_models, list(compute_model(i,euca_df)))
+}
+all_models <- bind_rows(all_models)
+all_models
+```
+
+## graphe des erreurs de prédictions empiriques (biaisées)
+```{r, opts.label = "figure3"}
+ggplot(all_models, aes(x = degree)) +
+  geom_point(aes(y = emp_err, color = "Empirical Error")) +
+  geom_line(aes(y = emp_err, color = "Empirical Error")) 
+
+
+```
+
+# graphe avec les différents polynômes, comparaison avec une méthode non paramétrique
+```{r, opts.label = "figure3"}
+p <- ggplot(data = euca_df, aes(x = circ, y = ht)) + geom_point(data = euca_df, aes(y = ht))
+p
+for (i in 1:D) {
+  p <- p + geom_line(data = all_models[["pred_n"]][[i]] %>% mutate(degree = sprintf("%2d", all_models[["degree"]][[i]])),
+                     aes(x = x, y = pred, color = degree))
+}
+p
+
+library(gridExtra)
+plt1 = peuc + geom_smooth() + ggtitle("Non-parametric")
+plt2 = p + ggtitle("Polynomes")
+grid.arrange(plt1, plt2,
+             ncol=2, nrow=1)
+
+
+p2<- p+ geom_smooth(method = "lm", se = FALSE)  + ggtitle("Geom_smooth")
+grid.arrange(p, p2,
+             ncol=2, nrow=1)
+```
+# Calcul des différentes erreurs de prédictions (sur les polynômes)
+```{r Poly, opts.label = "figure3"}
+library(caret)
+V <- 10
+T <- 2
+Folds <- caret::createMultiFolds(eucalyptus[["ht"]], k = V, times = T)
+errspoly <- data.frame()
+AICpoly<- data.frame()
+ppolys <- list()
+for ( d in 1:D ) {
+  reg <- lm(ht ~ poly(circ,d), data = eucalyptus)
+  ppolys[[d]] <- ggplot(data =eucalyptus, aes(x = circ, y = ht)) +
+    geom_point() + geom_smooth(method = "lm", 
+                               formula = sprintf("y ~ poly(x,%d)", d))+ggtitle("Polynôme de d°",d)+theme(plot.title = element_text(color="red", size=9))
+  err <- mean((eucalyptus[["ht"]]-predict(reg))^2)
+  sigmasq <- mean(residuals(reg)^2)
+  errCp = err + 2 * sigmasq * (1+d) / nrow(eucalyptus)
+  errCVM = matrix(0, nrow = 1, ncol = T*V)
+  for (v in 1:(T*V)) {
+    eucatrain <- slice(eucalyptus, Folds[[v]])
+    eucatest <- slice(eucalyptus, -Folds[[v]])
+    regtmp <- lm(ht ~ poly(circ, d), data = eucatrain)
+    predtmp <- predict(regtmp, newdata = eucatest)
+    errCVM[v] <- mean((eucatest[["ht"]]-predtmp)^2)
+  }
+  errCV <- mean(errCVM)
+  errCVsd <- sd(errCVM) 
+  LogLik <- -2 * logLik(reg)
+  LogLikAIC <- AIC(reg)
+  LogLikBIC <- BIC(reg)
+  errspoly <- rbind(errspoly, data.frame( method = sprintf("Poly_%d",d),
+                                          err = err, errCV = errCV,
+                                          errCVup = errCV + 2 * errCVsd / sqrt(T*V),
+                                          errCp = errCp))
+  AICpoly<-rbind(AICpoly, data.frame( method = sprintf("Poly_%d",d), LogLik = LogLik, LogLikAIC = LogLikAIC, LogLikBIC =LogLikBIC))
+}
+
+library("gridExtra")
+do.call(grid.arrange,c(ppolys, list(ncol = 4)))
+```
+
+```{r,opts.label = "figure3"}
+ggplot(data = gather(errspoly, key = "variable", value = "value", - method),
+       aes(x = method, y = value, color = variable)) +
+  geom_point(size = 1)+ theme(plot.title = element_text(face = "bold"))+ theme(plot.title = element_text(hjust = 0.5))+labs(title = "Graphe erreur de prédiction pour tous les polynômes")
+
+ggplot(data = gather(AICpoly, key = "variable", value = "value", - method),
+       aes(x = method, y = value, color = variable)) +
+  geom_point(size = 1)+ theme(plot.title = element_text(face = "bold"))+ theme(plot.title = element_text(hjust = 0.5))+labs(title = "Loglik,AIC,BIC pour tous les polynômes")
+
+```
+
+
+```{r}
+
+Find_Best <- function(errs) { 
+  nameserr <- names(errs)[-1]
+  for (nameerr in nameserr) {
+    writeLines(strwrap(paste(nameerr, ": ",
+                             errs[["method"]][which.min(errs[[nameerr]])],
+                             "(",min(errs[[nameerr]], na.rm =TRUE),")")))
+  }
+}
+
+Find_Best(errspoly)
+Find_Best(AICpoly)
+```
+Le polynôme dans la partie précedente devait être forcement de d"egrée 5 de la forme
+$$ p(x) = a_0 + a_1x + a_2x^2 + a_3x^3 + a_5x^5. 
+$$
+Dans cette partie on cherche un polynome de la forme
+$$p(x) = a_0 + a_3x^3 + a_5x^5
+$$
+## en travaillant sur les monômes
+
+```{r, include=FALSE, echo=FALSE}
+circ2<-I(circ^2)
+eucalyptus$circ2<-circ2
+circ3<-I(circ^3)
+eucalyptus$circ3<-circ3
+circ4<-I(circ^4)
+eucalyptus$circ4<-circ4
+circ5<-I(circ^5)
+eucalyptus$circ5<-circ5
+circ6<-I(circ^6)
+eucalyptus$circ6<-circ6
+circ7<-I(circ^7)
+eucalyptus$circ7<-circ7
+circ8<-I(circ^8)
+eucalyptus$circ8<-circ8
+circ9<-I(circ^9)
+eucalyptus$circ9<-circ9
+circ10<-I(circ^10)
+eucalyptus$circ10<-circ10
+attach(eucalyptus,warn.conflicts = FALSE)
+
+
+
+sub_var<-list(list())
+sub_var_copie<-list(list())
+variables<-list("circ","circ2","circ3","circ4","circ5","circ6","circ7","circ8","circ9","circ10")
+for (j in 1: 10){
+  sub_var_copie<-sub_var
+  for (k in 1: length(sub_var_copie)){
+   sub_var_copie[[k]]=c(sub_var_copie[[k]],list(variables[[j]]),recursive=FALSE)
+  }
+  sub_var<-c(sub_var,sub_var_copie,recursive=FALSE)
+}
+model_exh<-list()
+
+for (j in 2: 1024){
+  nom<-sub_var[[j]][[1]]
+  if (length(sub_var[[j]]) >= 2) {
+  for (k in 2:length(sub_var[[j]])){
+  nom<-paste(nom,sub_var[[j]][[k]],sep="+")
+  }
+  }
+  model_exh<-c(model_exh,list(list(nom,lm(as.formula(paste("ht ~",nom)),data=eucalyptus))),recursive=FALSE)
+}
+```
+
+
+```{r}
+library(caret)
+V<-10
+T<-2
+Folds <- caret::createMultiFolds(eucalyptus[["ht"]], k = V, times = T)
+computeErrLm <- function(model, name) {
+  err <- mean((eucalyptus[["ht"]]-predict(model))^2)
+  errCp <- err * ( 1 + 2 * length(model[["coefficients"]]) / nrow(eucalyptus))
+  errCVtmp <- matrix(0, nrow = 1, ncol = (T*V))
+  for (v in 1: (T*V)) {
+    eucatrain <- slice(eucalyptus, Folds[[v]])
+    eucatest <- slice(eucalyptus, -Folds[[v]])
+    regtmp <- lm(model, data = eucatrain)
+    predtmp <- predict(regtmp, newdata = eucatest)
+    errCVtmp[v] <- mean((eucatest[["ht"]]-predtmp)^2)
+  }
+  errCV <- mean(errCVtmp)
+  errCVup <- errCV + 2 * sd(errCVtmp) / sqrt(T*V)
+  
+  LogLik <- -2 * logLik(model)
+  LogLikAIC <- AIC(model)
+  LogLikBIC <- BIC(model)
+  
+  data.frame( method = name, err = err, errCp = errCp, errCV = errCV,
+              errCVup = errCVup , LogLik = LogLik, LogLikAIC = LogLikAIC,
+              LogLikBIC = LogLikBIC)
+}
+```
+
+```{r, include=FALSE, echo=TRUE}
+errs_exh = computeErrLm(model_exh[[1]][[2]], model_exh[[1]][[1]])
+for (j in 2: 1023){
+errs_exh<-rbind(errs_exh,computeErrLm(model_exh[[j]][[2]],model_exh[[j]][[1]]))
+}
+errs_exh
+```
+```{r}
+print(Find_Best(errs_exh))
+```
